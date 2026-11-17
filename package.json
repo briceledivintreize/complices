@@ -1,0 +1,22 @@
+{
+  "name": "complices",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Complices : jeux à deux en temps réel, où chaque réponse se joue en « Montrer sa carte ».",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@fontsource/cabin-sketch": "^5.3.0",
+    "@fontsource/caveat": "^5.3.0",
+    "@fontsource/inter": "^5.3.0",
+    "qrcode": "^1.5.4",
+    "ws": "^8.23.0"
+  }
+}

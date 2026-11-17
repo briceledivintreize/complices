@@ -1,0 +1,17 @@
+# Blueprint Render : https://render.com/docs/blueprint-spec
+# Une seule instance : les parties vivent en mémoire du serveur.
+services:
+  - type: web
+    name: complices
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TRUST_PROXY
+        value: "1"

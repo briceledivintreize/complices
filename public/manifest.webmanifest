@@ -1,0 +1,11 @@
+{
+  "name": "Complices",
+  "short_name": "Complices",
+  "description": "Des jeux à deux où chaque réponse se montre comme une ardoise.",
+  "lang": "fr",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#18211D",
+  "theme_color": "#18211D",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
