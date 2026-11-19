@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-const KINDS = new Set(['truth', 'bet', 'mirror', 'dare']);
-const INPUTS = new Set(['text', 'scale', 'choice', 'draw']);
+const KINDS = new Set(['truth', 'bet', 'mirror', 'dare', 'vote']);
+const INPUTS = new Set(['text', 'scale', 'choice', 'draw', 'player']);
 const WHERES = new Set(['any', 'together', 'remote']);
+const PLAYERS = new Set(['duo', 'any', 'group']);
 
 export function validCard(c) {
   if (!c || typeof c !== 'object') return false;
@@ -17,6 +18,10 @@ export function validCard(c) {
     if (!s || !Number.isInteger(s.min) || !Number.isInteger(s.max) || s.min >= s.max) return false;
   }
   if (c.kind === 'bet' && !['scale', 'choice'].includes(c.input)) return false;
+  if ((c.kind === 'vote') !== (c.input === 'player')) return false;
+  if (c.players === undefined) c.players = 'any';
+  if (!PLAYERS.has(c.players)) return false;
+  if (c.kind === 'vote' && c.players !== 'group') return false;
   return true;
 }
 

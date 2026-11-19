@@ -15,3 +15,9 @@ services:
         value: "22"
       - key: TRUST_PROXY
         value: "1"
+      # Base Neon pour la banque de questions perso (à remplir dans Render > Environment)
+      - key: DATABASE_URL
+        sync: false
+      # Jeton secret pour relire et valider les questions (généré par Render)
+      - key: ADMIN_TOKEN
+        generateValue: true

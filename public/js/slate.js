@@ -3,11 +3,12 @@
 import { h } from './dom.js';
 import * as sound from './sound.js';
 
-export const KIND_LABEL = { truth: 'Vérité', bet: 'Pari', mirror: 'Miroir', dare: 'Action' };
+export const KIND_LABEL = { truth: 'Vérité', bet: 'Pari', mirror: 'Miroir', dare: 'Action', vote: 'Vote' };
 export const LEVELS = ['Doux', 'Piquant', 'Audacieux'];
 
-/** Libellés des choix, du point de vue de celui qui écrit. */
-export function labelsFor(card, writerRole, targetName) {
+/** Libellés des choix, du point de vue de celui qui écrit. Pour un vote : place → pseudo. */
+export function labelsFor(card, writerRole, targetName, players = []) {
+  if (card.kind === 'vote') return Object.fromEntries(players.map((p) => [p.seat, p.name]));
   if (card.kind === 'dare') {
     return writerRole === 'target' ? ['Je relève', 'Je passe'] : [`${targetName} relève`, `${targetName} passe`];
   }
@@ -69,7 +70,7 @@ function whenSized(cv, fn) {
  * Crée la zone d'écriture de mon ardoise.
  * @returns {{el: HTMLElement, getAnswer: () => object|null, clear: () => void, lock: () => void}}
  */
-export function createInput({ card, input, role, peerName, onInk }) {
+export function createInput({ card, input, role, peerName, players = [], me = null, onInk }) {
   const ink = (s) => onInk && onInk(s);
 
   if (input === 'text') {
@@ -107,6 +108,28 @@ export function createInput({ card, input, role, peerName, onInk }) {
     return {
       el,
       getAnswer: () => (value === null ? null : { type: 'scale', value }),
+      clear: () => { value = null; buttons.forEach((x) => x.setAttribute('aria-pressed', 'false')); ink('erasing'); },
+      lock: () => { locked = true; },
+    };
+  }
+
+  if (input === 'player') {
+    let value = null;
+    let locked = false;
+    const buttons = players.map((p) => {
+      const b = h('button', { type: 'button', class: 'chalkbtn chalkfx', id: `slate-p${p.seat}`, 'aria-pressed': 'false', text: p.seat === me ? `${p.name} (moi)` : p.name });
+      b.addEventListener('click', () => {
+        if (locked) return;
+        value = p.seat;
+        buttons.forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        sound.circle(); ink('writing');
+      });
+      return b;
+    });
+    const el = h('div', { class: `optlist${players.length > 4 ? ' two-cols' : ''}`, role: 'group', 'aria-label': 'Désigne un joueur' }, buttons);
+    return {
+      el,
+      getAnswer: () => (value === null ? null : { type: 'player', value }),
       clear: () => { value = null; buttons.forEach((x) => x.setAttribute('aria-pressed', 'false')); ink('erasing'); },
       lock: () => { locked = true; },
     };
@@ -192,7 +215,12 @@ export function renderAnswer(face, answer, card, labels) {
     return;
   }
   const box = h('div', { class: 'written chalkfx' });
-  if (answer.type === 'scale') {
+  if (answer.type === 'skip') {
+    box.classList.add('skip');
+    box.textContent = "s'abstient";
+  } else if (answer.type === 'player') {
+    box.textContent = labels[answer.value] ?? '?';
+  } else if (answer.type === 'scale') {
     const max = card.scale?.max ?? 10;
     box.append(h('span', { class: 'big', text: String(answer.value) }), h('span', { class: 'unit', text: `sur ${max}` }));
   } else if (answer.type === 'choice') {

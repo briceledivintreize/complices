@@ -29,12 +29,14 @@ Pour tester seul, ouvre deux onglets : un qui crée la partie, et un autre qui o
 
 ## Ce que contient le MVP
 
+- **À deux ou en groupe** : en groupe, jusqu'à 8 joueurs rejoignent avec le même lien (bouton WhatsApp intégré), puis l'hôte lance la partie. Le Meneur choisit la Cible, et tous les autres parient. Il existe aussi des cartes **Vote** (« Qui ici… ? »). La Drague / couple reste réservée aux duos.
+- **Questions perso** : le Meneur peut écrire sa propre carte (Vérité, Pari, Miroir, Action ou Vote), avec une réponse écrite, des choix, une échelle ou un dessin. S'il l'accepte, sa question rejoint anonymement la banque de questions. Voir [BANQUE-DE-QUESTIONS.md](BANQUE-DE-QUESTIONS.md).
 - **Double Jeu**, l'Action ou Vérité réinventé. À chaque tour, le Meneur tire 3 cartes (Vérité ou Pari, Action, Miroir) et en choisit une. La Cible répond, et le Meneur parie sur sa réponse.
 - **5 façons d'écrire sur l'ardoise** : un mot, un chiffre entouré, un choix, un défi (relever ou passer) ou un dessin au doigt.
 - **Curseur secret** : la partie prend le niveau le plus bas des deux. Le niveau Audacieux reste suggestif, jamais explicite.
 - **Score** : Flair individuel et complicité commune. Les « Âmes jumelles » sont récompensées. La partie se joue en 10 tours ou s'arrête dès qu'un joueur atteint 20 points de Flair.
 - **Immersion** : sons de craie, d'éponge et de cloche, vibrations, poussière de craie, réactions en emoji envoyées à l'autre.
-- **135 cartes en français** : 45 par orientation (Drague / couple 18+, Amitié 16+, Centres d'intérêt 16+).
+- **171 cartes en français** : Drague / couple 45 (duo, 18+), Amitié 63 et Centres d'intérêt 63 (16+), dont 36 cartes pensées pour les groupes.
 - **Robustesse** :
   - reconnexion automatique et pause si l'autre se déconnecte ;
   - lien d'invitation à usage unique, valable 24 h ;
@@ -47,7 +49,7 @@ Pour tester seul, ouvre deux onglets : un qui crée la partie, et un autre qui o
 npm test
 ```
 
-18 tests, dont une partie complète à deux joueurs à travers le vrai serveur (HTTP + WebSocket).
+27 tests, dont une partie en duo et une partie de groupe à 3, jouées à travers le vrai serveur (HTTP + WebSocket).
 
 ## Structure
 
@@ -57,6 +59,7 @@ server/
   game.js     moteur de jeu (logique pure, testée)
   invite.js   codes d'invitation, secrets
   deck.js     chargement et validation des cartes
+  store.js    banque de questions perso (Postgres / Neon)
 decks/        romance.json, friendship.json, interests.json
 public/
   index.html, css/app.css

@@ -10,9 +10,10 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import QRCode from 'qrcode';
-import { Game, GameError, ORIENTATIONS, WHERE, LEVELS } from './game.js';
-import { loadDecks } from './deck.js';
+import { Game, GameError, ORIENTATIONS, WHERE, LEVELS, MAX_GROUP } from './game.js';
+import { loadDecks, validCard } from './deck.js';
 import { newCode, normalizeCode, hashCode, prettyCode, newSecret, sameSecret } from './invite.js';
+import { createStore, toCard, STATUSES } from './store.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -21,16 +22,38 @@ const HOST = process.env.HOST || '0.0.0.0';
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
 // Derrière un hébergeur (Render, Railway, Fly…), l'IP réelle et le HTTPS arrivent dans des en-têtes du proxy.
 const TRUST_PROXY = process.env.TRUST_PROXY === '1' || Boolean(process.env.RENDER);
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const INVITE_TTL_MS = 24 * 3600_000;
 const ROOM_IDLE_MS = 6 * 3600_000;
 const REACTIONS = new Set(['😂', '😳', '❤️', '🤯', '🔥', '👏']);
 const INK_STATES = new Set(['writing', 'erasing', 'idle']);
 
 const decks = loadDecks(path.join(ROOT, 'decks'));
-/** @type {Map<string, {game: Game, secrets: {A?: string, B?: string}, sockets: {A?: any, B?: any}, invite: any, timer: any}>} */
+/** Questions perso validées par l'équipe, ajoutées aux cartes du jeu. */
+let community = { romance: [], friendship: [], interests: [] };
+let store = createStore();
+
+/** @type {Map<string, {game: Game, secrets: Record<string,string>, sockets: Record<string,any>, invite: any, inviteHash: string, timer: any}>} */
 const rooms = new Map();
 /** hash du code → { roomId, expiresAt, usedAt } */
 const invites = new Map();
+
+const deckFor = (orientation) => decks[orientation].concat(community[orientation]);
+
+async function refreshCommunity() {
+  if (!store.enabled) return;
+  try {
+    const rows = await store.approvedCards();
+    const next = { romance: [], friendship: [], interests: [] };
+    for (const q of rows) {
+      const card = toCard(q);
+      if (next[q.orientation] && validCard(card)) next[q.orientation].push(card);
+    }
+    community = next;
+  } catch (e) {
+    console.error('[db] lecture des questions validées impossible :', e.message);
+  }
+}
 
 // ---------- utilitaires HTTP ----------
 
@@ -104,7 +127,7 @@ function lanAddress() {
   return (all.find((i) => i.address.startsWith('192.168.')) || all[0])?.address || null;
 }
 
-/** Lien d'invitation : si on joue depuis localhost, on donne l'adresse du PC sur le Wi-Fi pour que le téléphone de l'autre puisse l'ouvrir. */
+/** Lien d'invitation : si on joue depuis localhost, on donne l'adresse du PC sur le Wi-Fi pour que les téléphones puissent l'ouvrir. */
 function baseUrl(req) {
   if (PUBLIC_URL) return PUBLIC_URL;
   const host = req.headers.host || `localhost:${PORT}`;
@@ -137,11 +160,13 @@ async function serveInvitePage(res, rawCode) {
   try { html = await readFile(path.join(PUBLIC, 'index.html'), 'utf8'); } catch { return send(res, 500, 'Erreur', 'text/plain; charset=utf-8'); }
   const found = findInvite(rawCode);
   if (!found.error) {
-    const host = escapeHtml(found.room.game.players.A.name);
-    const label = escapeHtml(ORIENTATIONS[found.room.game.orientation].label);
+    const g = found.room.game;
+    const host = escapeHtml(g.nameOf(g.host));
+    const label = escapeHtml(ORIENTATIONS[g.orientation].label);
+    const title = g.mode === 'group' ? `${host} lance une partie de Complices : rejoins le groupe !` : `${host} t'invite à jouer à Complices`;
     const meta = [
-      `<meta property="og:title" content="${host} t'invite à jouer à Complices">`,
-      `<meta property="og:description" content="${label}. Chacun écrit sur son ardoise, puis vous montrez vos cartes en même temps. Tu oses ?">`,
+      `<meta property="og:title" content="${title}">`,
+      `<meta property="og:description" content="${label}. Chacun écrit sur son ardoise, puis tout le monde montre sa carte en même temps. Tu oses ?">`,
       '<meta property="og:type" content="website">',
     ].join('\n');
     html = html.replace('<!--OG-->', meta);
@@ -175,20 +200,23 @@ function findInvite(rawCode) {
   if (!code) return { error: [404, "Ce code n'existe pas."] };
   const inv = invites.get(hashCode(code));
   if (!inv || inv.expiresAt < Date.now() || !rooms.has(inv.roomId)) return { error: [404, "Ce lien n'existe pas ou a expiré. Demande un nouveau lien."] };
-  if (inv.usedAt) return { error: [410, 'Cette partie a déjà ses deux joueurs.'] };
-  return { code, inv, room: rooms.get(inv.roomId) };
+  const room = rooms.get(inv.roomId);
+  const g = room.game;
+  if (inv.usedAt || g.isFull()) return { error: [410, g.mode === 'duo' ? 'Cette partie a déjà ses deux joueurs.' : 'Cette partie est complète.'] };
+  if (g.phase !== 'lobby') return { error: [410, 'Cette partie a déjà commencé. Demande à l’hôte de relancer une partie.'] };
+  return { code, inv, room };
 }
 
 function broadcast(room) {
   const { game } = room;
-  for (const seat of ['A', 'B']) {
+  for (const seat of game.order) {
     const ws = room.sockets[seat];
     if (!ws || ws.readyState !== 1) continue;
     const msg = { t: 'state', view: game.view(seat) };
-    if (seat === 'A' && game.phase === 'lobby' && room.invite) msg.invite = room.invite;
+    if (game.phase === 'lobby' && room.invite) msg.invite = room.invite;
     ws.send(JSON.stringify(msg));
   }
-  // Le signal du Maître : à l'heure dite, les deux ardoises se retournent.
+  // Le signal du Maître : à l'heure dite, toutes les ardoises se retournent.
   if (game.phase === 'signal' && !room.timer) {
     const wait = Math.max(0, game.round.revealAt - Date.now()) + 5;
     room.timer = setTimeout(() => {
@@ -199,8 +227,16 @@ function broadcast(room) {
 }
 
 function relay(room, fromSeat, msg) {
-  const ws = room.sockets[fromSeat === 'A' ? 'B' : 'A'];
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+  for (const seat of room.game.order) {
+    if (seat === fromSeat) continue;
+    const ws = room.sockets[seat];
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+  }
+}
+
+function isAdmin(req) {
+  const h = String(req.headers.authorization || '');
+  return Boolean(ADMIN_TOKEN) && h.startsWith('Bearer ') && sameSecret(h.slice(7), ADMIN_TOKEN);
 }
 
 // ---------- API ----------
@@ -211,23 +247,25 @@ async function api(req, res, pathname) {
       if (rateLimited(req, 'create', 15)) return json(res, 429, { error: 'Trop de parties créées. Réessaie dans une minute.' });
       const body = await readJson(req);
       const name = cleanName(body.name);
+      const mode = body.mode === 'group' ? 'group' : 'duo';
       if (!name) return json(res, 400, { error: 'Choisis un pseudo de 1 à 20 caractères.' });
       if (!ORIENTATIONS[body.orientation]) return json(res, 400, { error: 'Choisis une orientation.' });
+      if (mode === 'group' && !ORIENTATIONS[body.orientation].group) return json(res, 400, { error: 'La Drague / couple se joue uniquement à deux.' });
       if (!WHERE[body.where]) return json(res, 400, { error: 'Dis-nous si vous jouez ensemble ou à distance.' });
       if (body.ageOk !== true) return json(res, 400, { error: `Cette orientation est réservée aux ${ORIENTATIONS[body.orientation].minAge} ans et plus.` });
-      const deck = decks[body.orientation];
+      const deck = deckFor(body.orientation);
       if (!deck.length) return json(res, 503, { error: 'Les cartes de cette orientation ne sont pas encore chargées.' });
 
       const roomId = crypto.randomUUID();
       const playerId = crypto.randomUUID();
       const secret = newSecret();
-      const game = new Game({ id: roomId, orientation: body.orientation, where: body.where, deck });
-      game.addPlayer('A', { id: playerId, name });
+      const game = new Game({ id: roomId, orientation: body.orientation, where: body.where, deck, mode });
+      const seat = game.addPlayer({ id: playerId, name });
       const code = newCode();
       const expiresAt = Date.now() + INVITE_TTL_MS;
       invites.set(hashCode(code), { roomId, expiresAt, usedAt: null });
       const invite = { code: prettyCode(code), link: `${baseUrl(req)}/j/${code}`, qr: `/qr/${code}.svg`, expiresAt };
-      rooms.set(roomId, { game, secrets: { A: secret }, sockets: {}, invite, inviteHash: hashCode(code), timer: null });
+      rooms.set(roomId, { game, secrets: { [seat]: secret }, sockets: {}, invite, inviteHash: hashCode(code), timer: null });
       return json(res, 201, { roomId, playerId, secret, invite });
     }
 
@@ -238,7 +276,10 @@ async function api(req, res, pathname) {
       if (found.error) return json(res, found.error[0], { error: found.error[1] });
       const g = found.room.game;
       return json(res, 200, {
-        hostName: g.players.A.name,
+        hostName: g.nameOf(g.host),
+        mode: g.mode,
+        players: g.active().map((s) => g.nameOf(s)),
+        maxPlayers: g.maxPlayers,
         orientation: g.orientation,
         orientationLabel: ORIENTATIONS[g.orientation].label,
         where: g.where,
@@ -255,16 +296,38 @@ async function api(req, res, pathname) {
       if (found.error) return json(res, found.error[0], { error: found.error[1] });
       const body = await readJson(req);
       const name = cleanName(body.name);
+      const g = found.room.game;
       if (!name) return json(res, 400, { error: 'Choisis un pseudo de 1 à 20 caractères.' });
-      if (body.ageOk !== true) return json(res, 400, { error: `Cette partie est réservée aux ${ORIENTATIONS[found.room.game.orientation].minAge} ans et plus.` });
+      if (g.active().some((s) => g.nameOf(s).toLowerCase() === name.toLowerCase())) return json(res, 409, { error: 'Ce pseudo est déjà pris dans cette partie.' });
+      if (body.ageOk !== true) return json(res, 400, { error: `Cette partie est réservée aux ${ORIENTATIONS[g.orientation].minAge} ans et plus.` });
       const playerId = crypto.randomUUID();
       const secret = newSecret();
-      found.inv.usedAt = Date.now();
-      found.room.secrets.B = secret;
-      found.room.invite = null;
-      found.room.game.addPlayer('B', { id: playerId, name });
+      const seat = g.addPlayer({ id: playerId, name });
+      found.room.secrets[seat] = secret;
+      if (g.mode === 'duo') { found.inv.usedAt = Date.now(); found.room.invite = null; }
       broadcast(found.room);
       return json(res, 201, { roomId: found.inv.roomId, playerId, secret });
+    }
+
+    // ----- banque de questions (réservé à l'équipe, protégé par ADMIN_TOKEN) -----
+    if (pathname.startsWith('/api/admin/')) {
+      if (!isAdmin(req)) return json(res, 404, { error: 'Route inconnue.' });
+      if (req.method === 'GET' && pathname === '/api/admin/stats') {
+        return json(res, 200, { db: store.enabled, questions: await store.stats(), community: Object.fromEntries(Object.entries(community).map(([k, v]) => [k, v.length])) });
+      }
+      if (req.method === 'GET' && pathname === '/api/admin/questions') {
+        const q = new URL(req.url, 'http://x').searchParams;
+        const status = STATUSES.includes(q.get('status')) ? q.get('status') : undefined;
+        return json(res, 200, { questions: await store.list({ status, limit: q.get('limit') }) });
+      }
+      m = pathname.match(/^\/api\/admin\/questions\/(\d{1,12})$/);
+      if (req.method === 'POST' && m) {
+        const body = await readJson(req);
+        if (!STATUSES.includes(body.status)) return json(res, 400, { error: `Statut attendu : ${STATUSES.join(', ')}.` });
+        const ok = await store.setStatus(m[1], body.status);
+        if (ok) await refreshCommunity();
+        return json(res, ok ? 200 : 404, { ok });
+      }
     }
 
     return json(res, 404, { error: 'Route inconnue.' });
@@ -290,20 +353,32 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/api/')) return api(req, res, pathname);
   const q = pathname.match(/^\/qr\/([A-Za-z0-9]{8})\.svg$/);
   if (q && req.method === 'GET') return qr(req, res, q[1]);
-  if (pathname === '/health') return json(res, 200, { ok: true, rooms: rooms.size });
+  if (pathname === '/health') return json(res, 200, { ok: true, rooms: rooms.size, db: store.enabled });
   if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Méthode non autorisée', 'text/plain; charset=utf-8');
   return serveStatic(req, res, pathname);
 });
 
 // ---------- WebSocket ----------
 
+/** Question perso : jouée tout de suite, et proposée à la banque seulement si le Meneur l'a accepté. */
+function pickCustom(room, g, seat, m) {
+  const card = g.pickCustom(seat, m.card, m.target);
+  if (m.share === true && store.enabled) {
+    store.save(card, { orientation: g.orientation, mode: g.mode, playerCount: g.active().length })
+      .catch((e) => console.error('[db] question non enregistrée :', e.message));
+  }
+}
+
 const ACTIONS = {
+  start: (g, s) => g.start(s),
+  leave: (g, s) => g.leave(s),
   set_level: (g, s, m) => g.setLevel(s, m.level),
-  pick: (g, s, m) => g.pick(s, String(m.cardId)),
+  pick: (g, s, m) => g.pick(s, String(m.cardId), m.target),
+  pick_custom: (g, s, m, room) => pickCustom(room, g, s, m),
   pose: (g, s, m) => g.pose(s, m.answer),
   unpose: (g, s) => g.unpose(s),
   pass: (g, s) => g.pass(s),
-  judge: (g, s, m) => g.judge(s, m.verdict),
+  judge: (g, s, m) => g.judge(s, m.verdicts),
   next: (g, s) => g.next(s),
   lower: (g, s) => g.lower(s),
   stop: (g, s) => g.stop(s),
@@ -313,7 +388,7 @@ const ACTIONS = {
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 128 * 1024 });
 
 // Battement de cœur : un téléphone verrouillé ou sorti du réseau ne ferme pas toujours sa connexion.
-// Sans réponse au ping, on coupe : l'autre joueur voit la pause au lieu d'attendre dans le vide.
+// Sans réponse au ping, on coupe : les autres voient qu'il est absent au lieu d'attendre dans le vide.
 const heartbeat = setInterval(() => {
   for (const ws of wss.clients) {
     if (ws.isAlive === false) { ws.terminate(); continue; }
@@ -360,21 +435,23 @@ wss.on('connection', (ws) => {
 
     if (!room) return;
     const g = room.game;
+    if (!g.players[seat]) { ws.close(4004, 'parti'); return; }
 
     if (m.t === 'ink') {
-      if (g.phase === 'write' && INK_STATES.has(m.state)) relay(room, seat, { t: 'peer_ink', state: m.state });
+      if (g.phase === 'write' && INK_STATES.has(m.state)) relay(room, seat, { t: 'peer_ink', seat, state: m.state });
       return;
     }
     if (m.t === 'react') {
-      if (REACTIONS.has(m.emoji)) relay(room, seat, { t: 'react', emoji: m.emoji });
+      if (REACTIONS.has(m.emoji)) relay(room, seat, { t: 'react', seat, emoji: m.emoji });
       return;
     }
     if (m.t === 'action') {
       const fn = ACTIONS[m.a];
       if (!fn) return;
       try {
-        fn(g, seat, m);
+        fn(g, seat, m, room);
         broadcast(room);
+        if (m.a === 'leave' && !g.players[seat]) { room.sockets[seat] = null; delete room.secrets[seat]; ws.close(4004, 'parti'); }
       } catch (e) {
         if (e instanceof GameError) reply({ t: 'error', code: e.code, message: e.message });
         else { console.error(e); reply({ t: 'error', code: 'server', message: 'Erreur du serveur.' }); }
@@ -397,7 +474,7 @@ wss.on('connection', (ws) => {
 setInterval(() => {
   const now = Date.now();
   for (const [id, r] of rooms) {
-    const online = r.sockets.A || r.sockets.B;
+    const online = Object.values(r.sockets).some(Boolean);
     if (!online && now - r.game.updatedAt > ROOM_IDLE_MS) {
       clearTimeout(r.timer);
       rooms.delete(id);
@@ -408,16 +485,26 @@ setInterval(() => {
   for (const [k, v] of hits) if (v.resetAt < now) hits.delete(k);
 }, 10 * 60_000).unref();
 
-export function start(port = PORT) {
+setInterval(refreshCommunity, 10 * 60_000).unref();
+
+/** @param {number} [port] @param {{store?: object}} [opts] */
+export function start(port = PORT, opts = {}) {
+  if (opts.store) store = opts.store;
   return new Promise((resolve) => {
-    server.listen(port, HOST, () => {
+    server.listen(port, HOST, async () => {
       const p = server.address().port;
       const lan = lanAddress();
-      const counts = Object.entries(decks).map(([k, v]) => `${k} ${v.length}`).join(', ');
+      let db = 'désactivée (ajoute DATABASE_URL pour garder les questions perso)';
+      if (store.enabled) {
+        try { await store.init(); await refreshCommunity(); db = 'connectée'; } catch (e) { db = `erreur : ${e.message}`; }
+      }
+      const counts = Object.entries(decks).map(([k, v]) => `${k} ${v.length + community[k].length}`).join(', ');
       console.log(`\n  Complices est lancé.`);
       console.log(`  Sur ce PC :        http://localhost:${p}`);
       if (lan) console.log(`  Sur le Wi-Fi :     http://${lan}:${p}   (pour un téléphone connecté au même réseau)`);
-      console.log(`  Cartes chargées :  ${counts}\n`);
+      console.log(`  Cartes chargées :  ${counts}`);
+      console.log(`  Base de données :  ${db}`);
+      console.log(`  Groupes :          jusqu'à ${MAX_GROUP} joueurs\n`);
       resolve(server);
     });
   });
@@ -426,7 +513,7 @@ export function start(port = PORT) {
 export function stop() {
   for (const r of rooms.values()) clearTimeout(r.timer);
   wss.clients.forEach((c) => c.terminate());
-  return new Promise((resolve) => server.close(resolve));
+  return new Promise((resolve) => server.close(() => store.close().finally(resolve)));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
